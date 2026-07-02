@@ -3,6 +3,7 @@ from homeassistant.core import HomeAssistant
 
 from homeassistant.components.number import RestoreNumber
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.const import STATE_UNAVAILABLE, UnitOfTime
@@ -754,6 +755,24 @@ class TapoSpotlightIntensity(TapoNumberEntity):
             )
             self._attr_max_value = 100
             self._attr_native_max_value = 100
+
+        # C320WS firmwares report an unreliable smartwtl_digital_level (often
+        # 100) even though the camera silently rejects anything above the range
+        # the official Tapo app exposes (1-5). Users hit "-40101 Parameter to
+        # set does not exist" when moving the slider higher. See
+        # JurajNyiri/HomeAssistant-Tapo-Control#979 and related reports.
+        device_model = (
+            entry.get("camData", {}).get("basic_info", {}).get("device_model") or ""
+        )
+        if device_model.startswith("C320WS") and self._attr_max_value > 5:
+            LOGGER.debug(
+                "Capping TapoSpotlightIntensity max at 5 for %s (firmware reported %s)",
+                device_model,
+                self._attr_max_value,
+            )
+            self._attr_max_value = 5
+            self._attr_native_max_value = 5
+
         self._attr_step = 1
         self._hass = hass
         intensity = entry["camData"]["whitelampConfigIntensity"]
@@ -780,12 +799,36 @@ class TapoSpotlightIntensity(TapoNumberEntity):
         return EntityCategory.CONFIG
 
     async def async_set_native_value(self, value: float) -> None:
-        result = await self._hass.async_add_executor_job(
-            self._controller.setWhitelampConfig,
-            False,
-            int(value),
-            [self.chn_id] if self.chn_id else None,
-        )
+        try:
+            result = await self._hass.async_add_executor_job(
+                self._controller.setWhitelampConfig,
+                False,
+                int(value),
+                [self.chn_id] if self.chn_id else None,
+            )
+        except Exception as e:
+            # Firmware rejects out-of-range values with -40101. Surface a
+            # clear message and, when possible, tighten the entity's max so
+            # subsequent slider moves match the actual accepted range without
+            # requiring a restart.
+            if "-40101" in str(e):
+                new_max = max(self._attr_native_min_value, int(value) - 1)
+                if new_max < self._attr_max_value:
+                    LOGGER.warning(
+                        "Spotlight intensity %s rejected by camera; "
+                        "lowering entity maximum to %s",
+                        int(value),
+                        new_max,
+                    )
+                    self._attr_max_value = new_max
+                    self._attr_native_max_value = new_max
+                    self.async_write_ha_state()
+                raise HomeAssistantError(
+                    f"Camera rejected spotlight intensity {int(value)} "
+                    f"(firmware only accepts up to {self._attr_max_value})."
+                ) from e
+            raise
+
         if "error_code" not in result or result["error_code"] == 0:
             self._attr_state = value
         self.async_write_ha_state()
