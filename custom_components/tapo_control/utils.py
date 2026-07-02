@@ -808,6 +808,161 @@ def result_has_error(result):
         return True
 
 
+def _candidate_siren_ids(camData, sirenType):
+    """Return an ordered, de-duplicated list of ids worth passing to
+    testUsrDefAudio. This exists because some cameras (notably C320WS
+    on newer firmware) do not populate alarm_config.siren_type, so we
+    also try known-safe defaults instead of giving up."""
+    candidates = []
+    if sirenType is not None and sirenType != "":
+        candidates.append(sirenType)
+
+    # First user-defined audio id (typically 3 when the camera exposes any
+    # user-recorded sounds). Newer firmwares that removed manual_msg_alarm
+    # tend to route the "test" endpoint at those ids.
+    user_start = camData.get("alarm_user_start_id") if camData else None
+    if user_start is not None:
+        candidates.append(int(user_start))
+
+    # Built-in siren indexes ("Siren" is always at 0, "Tone" at 1 per the
+    # fallback in getCamData). These almost always work when the camera
+    # exposes any alarm/alert API at all.
+    for idx, _name in enumerate(
+        (camData or {}).get("alarm_siren_type_list") or ["Siren", "Tone"]
+    ):
+        candidates.append(idx)
+
+    seen = set()
+    ordered = []
+    for c in candidates:
+        key = str(c)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(c)
+    return ordered
+
+
+async def trigger_siren(hass, entry, enabled, sirenType=None):
+    """Trigger the camera's manual siren. Tries every known API in order
+    and raises a single Exception listing what was attempted only if
+    every path failed. `entry` is the dict from hass.data[DOMAIN][entry_id]
+    (or a child device dict) so we have access to the controller and
+    parsed camData in one place."""
+    controller = entry["controller"]
+    camData = entry.get("camData") or {}
+    alarm_config = camData.get("alarm_config") or {}
+    is_hub = bool(camData.get("alarm_is_hubSiren"))
+    typeOfAlarm = alarm_config.get("typeOfAlarm")
+    attempts = []
+
+    def _record(method, ok, detail):
+        attempts.append(f"{method}: {'ok' if ok else 'failed'} ({detail})")
+        LOGGER.debug(
+            "trigger_siren: %s -> %s (%s)", method, "ok" if ok else "failed", detail
+        )
+
+    # Hub sirens (H100 etc.) use a completely separate endpoint.
+    if is_hub:
+        try:
+            result = await hass.async_add_executor_job(
+                controller.setHubSirenStatus, enabled
+            )
+            if not result_has_error(result):
+                _record("setHubSirenStatus", True, "success")
+                return
+            _record("setHubSirenStatus", False, f"result={result}")
+        except Exception as e:
+            _record("setHubSirenStatus", False, str(e))
+        raise Exception(
+            "Camera does not support triggering the siren. Attempts: "
+            + "; ".join(attempts)
+        )
+
+    # 1) Legacy manual_msg_alarm/start|stop endpoint used by older firmwares.
+    try:
+        result = await hass.async_add_executor_job(
+            controller.startManualAlarm if enabled else controller.stopManualAlarm
+        )
+        if not result_has_error(result):
+            _record("startManualAlarm" if enabled else "stopManualAlarm", True, "success")
+            return result
+        _record(
+            "startManualAlarm" if enabled else "stopManualAlarm",
+            False,
+            f"result={result}",
+        )
+    except Exception as e:
+        _record("startManualAlarm" if enabled else "stopManualAlarm", False, str(e))
+
+    # 2) setSirenStatus (msg_alarm variant used by some cameras).
+    try:
+        result = await hass.async_add_executor_job(controller.setSirenStatus, enabled)
+        if not result_has_error(result):
+            _record("setSirenStatus", True, "success")
+            return result
+        _record("setSirenStatus", False, f"result={result}")
+    except Exception as e:
+        _record("setSirenStatus", False, str(e))
+
+    # 3) testUsrDefAudio — this is the C520WS/C320WS style path. Try every
+    # id we consider plausible; the camera happily rejects invalid ids so
+    # this is safe.
+    for candidate in _candidate_siren_ids(camData, sirenType):
+        try:
+            result = await hass.async_add_executor_job(
+                controller.testUsrDefAudio, candidate, enabled
+            )
+            if not result_has_error(result):
+                _record(f"testUsrDefAudio(id={candidate})", True, "success")
+                return result
+            _record(
+                f"testUsrDefAudio(id={candidate})", False, f"result={result}"
+            )
+        except Exception as e:
+            _record(f"testUsrDefAudio(id={candidate})", False, str(e))
+
+    # 4) setAlertConfig fallback for cameras that only expose the newer
+    # msg_alarm.chn1_msg_alarm_info surface. Copies the current config and
+    # flips `enabled`. Only tried when the parsed config is available so we
+    # never send a malformed payload.
+    alert_config = alarm_config.get("alert_config")
+    if typeOfAlarm == "getAlertConfig" and isinstance(alert_config, dict):
+        try:
+            new_config = dict(alert_config)
+            new_config["enabled"] = "on" if enabled else "off"
+            result = await hass.async_add_executor_job(
+                controller.executeFunction,
+                "setAlertConfig",
+                {"msg_alarm": {"chn1_msg_alarm_info": new_config}},
+            )
+            if not result_has_error(result):
+                _record("setAlertConfig(enabled)", True, "success")
+                return result
+            _record("setAlertConfig(enabled)", False, f"result={result}")
+        except Exception as e:
+            _record("setAlertConfig(enabled)", False, str(e))
+
+    raise Exception(
+        "Camera does not support triggering the siren. Attempts: "
+        + "; ".join(attempts)
+    )
+
+
+def resolve_siren_type(camData):
+    """Return the best guess for a siren id to preload on siren entities.
+    Falls back to 0 (index of "Siren" in the default alarm_siren_type_list)
+    so newer C320WS-style firmwares always have *something* to try."""
+    if not camData:
+        return 0
+    alarm_config = camData.get("alarm_config") or {}
+    for key in ("siren_type", "alarm_type"):
+        value = alarm_config.get(key)
+        if value is not None and value != "":
+            return value
+    return 0
+
+
 async def initOnvifEvents(hass, host, username, password):
     device = ONVIFCamera(
         host,
