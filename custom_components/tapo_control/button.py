@@ -8,7 +8,13 @@ from homeassistant.const import STATE_UNAVAILABLE
 
 from .const import DOMAIN, LOGGER
 from .tapo.entities import TapoButtonEntity
-from .utils import syncTime, check_and_create, resolve_siren_type, trigger_siren
+from .utils import (
+    check_and_create,
+    resolve_siren_type,
+    supports_manual_siren,
+    syncTime,
+    trigger_siren,
+)
 
 
 async def async_setup_entry(
@@ -26,19 +32,28 @@ async def async_setup_entry(
             if entry["controller"].isKLAP is False:
                 buttons.append(TapoFormatButton(entry, hass, config_entry))
 
-            tapoStartManualAlarmButton = await check_and_create(
-                entry, hass, TapoStartManualAlarmButton, "getAlarm", config_entry
-            )
-            if tapoStartManualAlarmButton:
-                LOGGER.debug("Adding tapoStartManualAlarmButton...")
-                buttons.append(tapoStartManualAlarmButton)
+            if supports_manual_siren(entry.get("camData")):
+                tapoStartManualAlarmButton = await check_and_create(
+                    entry, hass, TapoStartManualAlarmButton, "getAlarm", config_entry
+                )
+                if tapoStartManualAlarmButton:
+                    LOGGER.debug("Adding tapoStartManualAlarmButton...")
+                    buttons.append(tapoStartManualAlarmButton)
 
-            tapoStopManualAlarmButton = await check_and_create(
-                entry, hass, TapoStopManualAlarmButton, "getAlarm", config_entry
-            )
-            if tapoStopManualAlarmButton:
-                LOGGER.debug("Adding tapoStopManualAlarmButton...")
-                buttons.append(tapoStopManualAlarmButton)
+                tapoStopManualAlarmButton = await check_and_create(
+                    entry, hass, TapoStopManualAlarmButton, "getAlarm", config_entry
+                )
+                if tapoStopManualAlarmButton:
+                    LOGGER.debug("Adding tapoStopManualAlarmButton...")
+                    buttons.append(tapoStopManualAlarmButton)
+            else:
+                LOGGER.debug(
+                    "Skipping Manual Alarm Start/Stop buttons: model %s has "
+                    "no manual-siren API",
+                    (entry.get("camData") or {}).get("basic_info", {}).get(
+                        "device_model"
+                    ),
+                )
 
             if not entry["isParent"] and entry["controller"].isKLAP is False:
                 buttons.append(TapoSyncTimeButton(entry, hass, config_entry))

@@ -963,6 +963,23 @@ def resolve_siren_type(camData):
     return 0
 
 
+def supports_manual_siren(camData):
+    """Whether the camera's firmware exposes any endpoint that can trigger
+    the siren on demand. Returns False for known-broken models so we can
+    skip creating the Siren entity and the Manual Alarm Start/Stop buttons
+    (they would be created via getAlarm/getSirenTypeList probes today but
+    every call at runtime fails with -40106). See MODELS_WITHOUT_MANUAL_SIREN
+    in const.py for the list and the upstream issues that back it."""
+    from .const import MODELS_WITHOUT_MANUAL_SIREN
+
+    if not camData:
+        return True
+    device_model = (camData.get("basic_info") or {}).get("device_model") or ""
+    return not any(
+        device_model.startswith(prefix) for prefix in MODELS_WITHOUT_MANUAL_SIREN
+    )
+
+
 async def initOnvifEvents(hass, host, username, password):
     device = ONVIFCamera(
         host,
