@@ -106,3 +106,13 @@ TAPO_PREFIXES = (
     r"^d[0-9]{3}[a-zA-Z]*c_.*",  # Doorbell Chimes (D100C, D230C, D325C, etc.)
     r"^h[0-9]{3}[a-zA-Z]*_.*",  # Smart Hubs (H100, H200, H300, etc.)
 )
+
+# Models whose firmware exposes no manual-siren endpoint (startManualAlarm,
+# setSirenStatus, testUsrDefAudio and setAlertConfig all respond with
+# -40106 UNSUPPORTED_METHOD / -40210 METHOD_DO_NOT_EXIST). The Tapo mobile
+# app also has no manual siren button for these cameras, so there is nothing
+# for the integration to call. Suppress the Siren entity and the Manual
+# Alarm Start/Stop buttons for these models so users don't see controls
+# that always fail. See upstream issues #373, #678, #918 and discussion
+# #978 for confirmation from JurajNyiri that no auto-detection is possible.
+MODELS_WITHOUT_MANUAL_SIREN = ("C320WS",)
